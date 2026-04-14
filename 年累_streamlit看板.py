@@ -1,5 +1,7 @@
 import streamlit as st
 import pandas as pd
+import sqlite3
+import zipfile
 import tempfile
 import os
 from datetime import datetime, timedelta
@@ -12,10 +14,12 @@ st.set_page_config(layout="wide", page_title="天猫新零售数据看板", page
 # ==================== 精美样式（增强版） ====================
 st.markdown("""
 <style>
+    /* 全局背景 */
     .stApp {
         background: linear-gradient(135deg, #f0f4fc 0%, #e9eef6 100%);
         font-family: 'Inter', 'Segoe UI', 'Roboto', sans-serif;
     }
+    /* 卡片通用样式 */
     .card {
         background: rgba(255, 255, 255, 0.95);
         backdrop-filter: blur(2px);
@@ -26,6 +30,11 @@ st.markdown("""
         border: 1px solid rgba(255,255,255,0.6);
         margin-bottom: 1.2rem;
     }
+    .card:hover {
+        transform: translateY(-3px);
+        box-shadow: 0 16px 28px rgba(0,0,0,0.08);
+    }
+    /* 指标卡片特殊样式 */
     .metric-card {
         background: linear-gradient(135deg, #ffffff 0%, #f9fcff 100%);
         border-radius: 24px;
@@ -33,6 +42,18 @@ st.markdown("""
         box-shadow: 0 4px 12px rgba(0,0,0,0.03);
         border: 1px solid rgba(59,130,246,0.15);
         transition: all 0.2s;
+        position: relative;
+        overflow: hidden;
+    }
+    .metric-card::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 4px;
+        height: 100%;
+        background: linear-gradient(180deg, #3b82f6, #7c3aed);
+        border-radius: 4px 0 0 4px;
     }
     .metric-card:hover {
         transform: translateY(-2px);
@@ -60,35 +81,83 @@ st.markdown("""
     }
     .compare-up { color: #10b981; font-weight: 500; }
     .compare-down { color: #ef4444; font-weight: 500; }
+    /* 渐变标题 */
     .dashboard-title {
-        font-size: 2rem;
-        font-weight: 700;
-        background: linear-gradient(120deg, #1e40af, #7c3aed);
+        font-size: 2.2rem;
+        font-weight: 800;
+        background: linear-gradient(120deg, #1e40af, #7c3aed, #ec4899);
+        background-size: 200% auto;
         -webkit-background-clip: text;
         background-clip: text;
         color: transparent;
         margin-bottom: 0.2rem;
+        animation: gradient_shift 3s ease infinite;
     }
+    @keyframes gradient_shift {
+        0% { background-position: 0% center; }
+        50% { background-position: 100% center; }
+        100% { background-position: 0% center; }
+    }
+    /* 章节标题 */
     .section-header {
-        font-size: 1.3rem;
-        font-weight: 600;
+        font-size: 1.2rem;
+        font-weight: 700;
         color: #1f2937;
-        border-left: 5px solid #3b82f6;
-        padding-left: 0.8rem;
-        margin: 1.2rem 0 1rem 0;
+        border-left: 6px solid;
+        border-image: linear-gradient(180deg, #3b82f6, #7c3aed) 1;
+        padding-left: 1rem;
+        margin: 1.5rem 0 1rem 0;
         letter-spacing: -0.01em;
+        position: relative;
     }
+    .section-header::after {
+        content: '';
+        position: absolute;
+        bottom: -4px;
+        left: 1rem;
+        right: 0;
+        height: 2px;
+        background: linear-gradient(90deg, rgba(59,130,246,0.3), transparent);
+    }
+    /* 图表容器 */
     .stPlotlyChart {
         background: white;
         border-radius: 24px;
-        padding: 0.8rem;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.02);
+        padding: 1rem;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.04);
         border: 1px solid #eef2f6;
     }
+    /* 侧边栏美化 */
     [data-testid="stSidebar"] {
-        background: rgba(255,255,255,0.92);
-        backdrop-filter: blur(8px);
+        background: rgba(255,255,255,0.95);
+        backdrop-filter: blur(12px);
         border-right: 1px solid #e2e8f0;
+    }
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] {
+        padding: 1rem;
+    }
+    /* 多选框美化 */
+    .stMultiSelect > div > div {
+        background: #f8fafc;
+        border-radius: 12px;
+        border: 1px solid #e2e8f0;
+    }
+    /* 进度条美化 */
+    .stProgress > div > div {
+        background: linear-gradient(90deg, #3b82f6, #7c3aed);
+        border-radius: 10px;
+    }
+    /* 滚动条美化 */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #f1f5f9; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+    /* 统计数字动画 */
+    .animate-number {
+        animation: fadeInUp 0.6s ease;
+    }
+    @keyframes fadeInUp {
+        from { opacity: 0; transform: translateY(10px); }
+        to { opacity: 1; transform: translateY(0); }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -255,7 +324,6 @@ def load_data():
     if not os.path.exists("data.zip"):
         st.error("❌ 未找到 data.zip 文件，请将数据文件放在应用同目录下")
         st.stop()
-    import zipfile
     with zipfile.ZipFile("data.zip", "r") as zf:
         db_files = [f for f in zf.namelist() if f.endswith(".db")]
         if not db_files:
@@ -266,7 +334,6 @@ def load_data():
                 tmp.write(f.read())
             tmp_path = tmp.name
 
-    import sqlite3
     conn = sqlite3.connect(tmp_path)
     try:
         df_main = pd.read_sql("SELECT * FROM 客资明细表", conn)
@@ -357,6 +424,8 @@ actual_areas = sorted([a for a in df_main["片区"].dropna().unique() if a and a
 brand_options = actual_brands + ["洗衣机汇总", "美的厨热", "美的冰箱", "美的空调"]
 
 st.sidebar.markdown("## 🎛️ 筛选面板")
+st.sidebar.markdown("---")
+
 if not df_main["日期"].isna().all():
     min_date = df_main["日期"].min().date()
     max_date = df_main["日期"].max().date()
@@ -394,17 +463,26 @@ compare_orders = get_compare_html(order_count, order_count_day_prev, order_count
 compare_amount = get_compare_html(total_amount, amount_day_prev, amount_month_prev)
 
 latest_date = max_date.strftime("%Y年%m月%d日") if not df_main["日期"].isna().all() else "未知"
+
+# 页面标题
 st.markdown('<div class="dashboard-title">🏬 天猫新零售数据看板</div>', unsafe_allow_html=True)
-st.markdown(f"<div style='color:#4b5563; margin-bottom:1rem;'>数据更新至 {latest_date}</div>", unsafe_allow_html=True)
+st.markdown(f"""
+<div style='display:flex;align-items:center;gap:1rem;margin-bottom:1.5rem;'>
+    <span style='background:linear-gradient(135deg,#3b82f6,#7c3aed);color:white;padding:0.3rem 1rem;border-radius:20px;font-size:0.85rem;font-weight:600;'>
+        📅 数据更新至 {latest_date}
+    </span>
+    <span style='background:#f0fdf4;color:#166534;padding:0.3rem 1rem;border-radius:20px;font-size:0.85rem;font-weight:600;border:1px solid #bbf7d0;'>
+        🎯 筛选条件已生效
+    </span>
+</div>
+""", unsafe_allow_html=True)
 
-# ==================== 【第一部分：你的原始看板】====================
-st.markdown("---")
-st.markdown("### 📌 基础看板", unsafe_allow_html=True)
-
+# ==================== KPI 指标卡片 ====================
+total_wan = total_amount / 10000
 c1, c2, c3, c4 = st.columns(4)
 with c1:
     st.markdown(f"""
-    <div class="metric-card">
+    <div class="metric-card animate-number">
         <div class="metric-label">📋 总客资</div>
         <div class="metric-value">{total_leads:,}</div>
         {compare_leads}
@@ -412,7 +490,7 @@ with c1:
     """, unsafe_allow_html=True)
 with c2:
     st.markdown(f"""
-    <div class="metric-card">
+    <div class="metric-card animate-number">
         <div class="metric-label">✅ 有效客资</div>
         <div class="metric-value">{valid_leads:,}</div>
         {compare_valid}
@@ -420,7 +498,7 @@ with c2:
     """, unsafe_allow_html=True)
 with c3:
     st.markdown(f"""
-    <div class="metric-card">
+    <div class="metric-card animate-number">
         <div class="metric-label">🛒 成交单量</div>
         <div class="metric-value">{order_count:,}</div>
         {compare_orders}
@@ -428,52 +506,58 @@ with c3:
     """, unsafe_allow_html=True)
 with c4:
     st.markdown(f"""
-    <div class="metric-card">
-        <div class="metric-label">💰 总金额（万元）</div>
-        <div class="metric-value">{total_amount/10000:.2f} 万</div>
+    <div class="metric-card animate-number">
+        <div class="metric-label">💰 总金额</div>
+        <div class="metric-value">{total_wan:.2f} 万</div>
         {compare_amount}
     </div>
     """, unsafe_allow_html=True)
 
-# 日客资数趋势
+# ========== 第一行：日客资数趋势 ==========
 st.markdown('<div class="section-header">📅 日客资数趋势</div>', unsafe_allow_html=True)
 if not df_m_curr.empty and "日期" in df_m_curr:
     daily_leads = df_m_curr.groupby(df_m_curr["日期"].dt.date).size().reset_index(name="客资数")
     daily_leads["日期_中文"] = daily_leads["日期"].apply(lambda d: d.strftime("%m-%d"))
     fig_daily = px.bar(daily_leads, x="日期_中文", y="客资数", text="客资数",
                        color_discrete_sequence=['#3b82f6'], title="每日客资数量")
-    fig_daily.update_traces(texttemplate='%{text:,}', textposition='outside')
+    fig_daily.update_traces(texttemplate='%{text:,}', textposition='outside',
+                            marker=dict(line=dict(color='#2563eb', width=1)))
     fig_daily.update_layout(
         plot_bgcolor='rgba(0,0,0,0)',
         xaxis_tickangle=-30,
-        height=500,
-        margin=dict(l=20, r=20, t=40, b=80)
+        height=480,
+        margin=dict(l=20, r=20, t=50, b=80),
+        xaxis=dict(showgrid=False, linecolor='#e2e8f0'),
+        yaxis=dict(showgrid=True, gridcolor='#f1f5f9', linecolor='#e2e8f0'),
+        title=dict(font=dict(size=16, color='#1f2937'))
     )
     st.plotly_chart(fig_daily, use_container_width=True)
 else:
     st.info("无日期数据")
 
-# 转化漏斗
+# ========== 第二行：转化漏斗 ==========
 st.markdown('<div class="section-header">📉 转化漏斗</div>', unsafe_allow_html=True)
 valid_mask_curr = df_m_curr["外呼状态"].isin(["高意向", "低意向", "无需外呼"])
 assigned = df_m_curr[valid_mask_curr & (df_m_curr["最新跟进状态"] != "未分配")].shape[0] if "最新跟进状态" in df_m_curr else 0
 followed = df_m_curr[valid_mask_curr & (~df_m_curr["最新跟进状态"].isin(["未分配", "待查看", "待联系"]))].shape[0] if "最新跟进状态" in df_m_curr else 0
 funnel_labels = ["总客资", "有效客资", "已分配", "已跟进", "成交"]
 funnel_values = [total_leads, valid_leads, assigned, followed, order_count]
+colors = ['#3b82f6', '#6366f1', '#8b5cf6', '#a855f7', '#ec4899']
 fig_funnel = go.Figure(go.Funnel(
-    y=funnel_labels, x=funnel_values,
-    marker=dict(color=['#1f77b4','#ff7f0e','#2ca02c','#d62728','#9467bd']),
-    textinfo="value", texttemplate='%{value:,.0f}', textposition="inside"
+    y=funnel_labels, x=funnel_values, marker=dict(color=colors),
+    textinfo="value+percent initial", texttemplate='%{value:,.0f}<br>(%{percentInitial})', textposition="inside",
+    connector=dict(line=dict(color="#e2e8f0", width=2))
 ))
 fig_funnel.update_layout(
     paper_bgcolor='rgba(0,0,0,0)',
     plot_bgcolor='rgba(0,0,0,0)',
     margin=dict(l=10, r=10, t=30, b=10),
-    height=400
+    height=420,
+    font=dict(color='#4b5563')
 )
 st.plotly_chart(fig_funnel, use_container_width=True)
 
-# 品牌客资与订单金额对比 + 运营中心客资量
+# ========== 第三行：品牌客资与订单金额对比 + 运营中心客资量 TOP10 ==========
 col_a, col_b = st.columns(2)
 with col_a:
     st.markdown('<div class="section-header">🏷️ 品牌客资量与订单金额对比</div>', unsafe_allow_html=True)
@@ -483,12 +567,21 @@ with col_a:
         brand_comp = brand_leads.merge(brand_amount, on="品牌", how="outer").fillna(0)
         brand_comp = brand_comp.sort_values("客资量", ascending=False).head(10)
         fig_comp = go.Figure()
-        fig_comp.add_trace(go.Bar(x=brand_comp["品牌"], y=brand_comp["客资量"], name="客资量", marker_color='#3b82f6', yaxis="y"))
-        fig_comp.add_trace(go.Bar(x=brand_comp["品牌"], y=brand_comp["订单金额"], name="订单金额(元)", marker_color='#f97316', yaxis="y2"))
+        fig_comp.add_trace(go.Bar(x=brand_comp["品牌"], y=brand_comp["客资量"], name="客资量",
+                                  marker_color='#3b82f6', yaxis="y",
+                                  marker=dict(line=dict(color='#2563eb', width=1))))
+        fig_comp.add_trace(go.Bar(x=brand_comp["品牌"], y=brand_comp["订单金额"], name="订单金额(元)",
+                                  marker_color='#f97316', yaxis="y2",
+                                  marker=dict(line=dict(color='#ea580c', width=1))))
         fig_comp.update_layout(
-            yaxis=dict(title="客资量", side="left"),
-            yaxis2=dict(title="订单金额(元)", overlaying="y", side="right"),
-            plot_bgcolor='rgba(0,0,0,0)', xaxis_tickangle=-45, barmode='group'
+            barmode='group',
+            yaxis=dict(title="客资量", side="left", showgrid=True, gridcolor='#f1f5f9'),
+            yaxis2=dict(title="订单金额(元)", overlaying="y", side="right", showgrid=False),
+            plot_bgcolor='rgba(0,0,0,0)',
+            xaxis_tickangle=-45,
+            legend=dict(orientation="h", y=1.12, x=0.5, xanchor='center'),
+            margin=dict(l=20, r=20, t=50, b=60),
+            height=420
         )
         st.plotly_chart(fig_comp, use_container_width=True)
     else:
@@ -501,12 +594,18 @@ with col_b:
         fig_center_leads = px.bar(center_leads, x="客资量", y="运营中心", orientation='h',
                                   color="客资量", color_continuous_scale="Blues", text="客资量")
         fig_center_leads.update_traces(texttemplate='%{text:,}', textposition='outside')
-        fig_center_leads.update_layout(plot_bgcolor='rgba(0,0,0,0)', height=400)
+        fig_center_leads.update_layout(
+            plot_bgcolor='rgba(0,0,0,0)',
+            height=420,
+            xaxis=dict(showgrid=True, gridcolor='#f1f5f9'),
+            yaxis=dict(showgrid=False),
+            coloraxis_colorbar=dict(title="", tickformat=",")
+        )
         st.plotly_chart(fig_center_leads, use_container_width=True)
     else:
         st.info("无客资数据")
 
-# 品类订单金额占比 + 运营中心订单金额
+# ========== 第四行：品类订单金额占比 + 各运营中心订单金额 TOP10 ==========
 col_c, col_d = st.columns(2)
 with col_c:
     st.markdown('<div class="section-header">🍩 品类订单金额占比</div>', unsafe_allow_html=True)
@@ -514,8 +613,19 @@ with col_c:
         cat_sale = df_o_curr.groupby("品类")["订单金额"].sum().reset_index()
         cat_sale["万元"] = cat_sale["订单金额"] / 10000
         fig_cat_pie = px.pie(cat_sale, names="品类", values="订单金额", title="品类销售额占比",
-                             color_discrete_sequence=px.colors.qualitative.Pastel)
-        fig_cat_pie.update_traces(textposition='inside', textinfo='percent+label')
+                             color_discrete_sequence=px.colors.qualitative.Pastel2)
+        fig_cat_pie.update_traces(
+            textposition='inside',
+            textinfo='percent+label',
+            hole=0.4,
+            marker=dict(line=dict(color='white', width=2))
+        )
+        fig_cat_pie.update_layout(
+            height=420,
+            margin=dict(l=20, r=20, t=50, b=20),
+            legend=dict(orientation="h", y=-0.1, x=0.5, xanchor='center'),
+            title=dict(font=dict(size=16, color='#1f2937'))
+        )
         st.plotly_chart(fig_cat_pie, use_container_width=True)
     else:
         st.info("无订单数据")
@@ -528,12 +638,17 @@ with col_d:
         fig_center_amount = px.bar(center_amount, x="万元", y="运营中心", orientation='h',
                                    color="万元", color_continuous_scale="Tealgrn", text="万元")
         fig_center_amount.update_traces(texttemplate='%{text:.1f}', textposition='outside')
-        fig_center_amount.update_layout(plot_bgcolor='rgba(0,0,0,0)', height=400)
+        fig_center_amount.update_layout(
+            plot_bgcolor='rgba(0,0,0,0)',
+            height=420,
+            xaxis=dict(showgrid=True, gridcolor='#f1f5f9'),
+            yaxis=dict(showgrid=False)
+        )
         st.plotly_chart(fig_center_amount, use_container_width=True)
     else:
         st.info("无订单数据")
 
-# 转化率趋势
+# ========== 第五行：转化率趋势（面积图） ==========
 st.markdown('<div class="section-header">📈 转化率趋势（面积图）</div>', unsafe_allow_html=True)
 if not df_m_curr.empty and "日期" in df_m_curr:
     daily_trend = df_m_curr.groupby(df_m_curr["日期"].dt.date).agg(
@@ -549,13 +664,21 @@ if not df_m_curr.empty and "日期" in df_m_curr:
     daily_trend["日期_中文"] = daily_trend["日期"].apply(lambda d: d.strftime("%m-%d"))
     fig_area = px.area(daily_trend, x="日期_中文", y="转化率", title="每日转化率趋势",
                        labels={"转化率": "转化率", "日期_中文": "日期"},
-                       color_discrete_sequence=['#ef4444'])
-    fig_area.update_layout(plot_bgcolor='rgba(0,0,0,0)', height=450)
+                       color_discrete_sequence=['#ec4899'])
+    fig_area.update_traces(fill='tozeroy', line=dict(width=3))
+    fig_area.update_layout(
+        plot_bgcolor='rgba(0,0,0,0)',
+        height=420,
+        margin=dict(l=20, r=20, t=50, b=40),
+        xaxis=dict(showgrid=False, linecolor='#e2e8f0'),
+        yaxis=dict(showgrid=True, gridcolor='#f1f5f9', linecolor='#e2e8f0', tickformat='.1%'),
+        title=dict(font=dict(size=16, color='#1f2937'))
+    )
     st.plotly_chart(fig_area, use_container_width=True)
 else:
     st.info("无数据")
 
-# 省份销售额排行 + 帕累托
+# ========== 第六行：省份销售额排行 + 帕累托分析 ==========
 col_e, col_f = st.columns(2)
 with col_e:
     st.markdown('<div class="section-header">🗺️ 省份销售额排行 TOP20</div>', unsafe_allow_html=True)
@@ -568,33 +691,47 @@ with col_e:
         fig_prov = px.bar(province_sale, x="万元", y="省份_订单", orientation='h',
                           color="万元", color_continuous_scale="Blues", text="万元")
         fig_prov.update_traces(texttemplate='%{text:.1f}', textposition='outside')
-        fig_prov.update_layout(plot_bgcolor='rgba(0,0,0,0)', height=500)
+        fig_prov.update_layout(
+            plot_bgcolor='rgba(0,0,0,0)',
+            height=480,
+            xaxis=dict(showgrid=True, gridcolor='#f1f5f9'),
+            yaxis=dict(showgrid=False)
+        )
         st.plotly_chart(fig_prov, use_container_width=True)
     else:
         st.info("无订单数据")
 with col_f:
     st.markdown('<div class="section-header">📊 省份销售额帕累托分析</div>', unsafe_allow_html=True)
     if not df_o_curr.empty:
-        pareto_data = df_o_curr.groupby("省份_订单")["订单金额"].sum().reset_index()
-        pareto_data = pareto_data[pareto_data["省份_订单"].notna() & (pareto_data["省份_订单"] != "")]
-        pareto_data = pareto_data[pareto_data["省份_订单"].isin(STANDARD_PROVINCES)]
-        pareto_data["万元"] = pareto_data["订单金额"] / 10000
-        pareto_data = pareto_data.sort_values("万元", ascending=False)
-        pareto_data["累计百分比"] = pareto_data["万元"].cumsum() / pareto_data["万元"].sum() * 100
+        pareto = df_o_curr.groupby("省份_订单")["订单金额"].sum().reset_index()
+        pareto = pareto[pareto["省份_订单"].notna() & (pareto["省份_订单"] != "")]
+        pareto = pareto[pareto["省份_订单"].isin(STANDARD_PROVINCES)]
+        pareto["万元"] = pareto["订单金额"] / 10000
+        pareto = pareto.sort_values("万元", ascending=False)
+        pareto["累计百分比"] = pareto["万元"].cumsum() / pareto["万元"].sum() * 100
         fig_pareto = go.Figure()
-        fig_pareto.add_trace(go.Bar(x=pareto_data["省份_订单"], y=pareto_data["万元"], name="销售额(万元)", marker_color='#3b82f6'))
-        fig_pareto.add_trace(go.Scatter(x=pareto_data["省份_订单"], y=pareto_data["累计百分比"], name="累计百分比", yaxis="y2", marker_color='#ef4444', mode='lines+markers'))
+        fig_pareto.add_trace(go.Bar(
+            x=pareto["省份_订单"], y=pareto["万元"], name="销售额(万元)",
+            marker_color='#3b82f6', marker=dict(line=dict(color='#2563eb', width=1))
+        ))
+        fig_pareto.add_trace(go.Scatter(
+            x=pareto["省份_订单"], y=pareto["累计百分比"], name="累计百分比",
+            yaxis="y2", marker_color='#ef4444', mode='lines+markers',
+            line=dict(width=3, shape='spline'), marker=dict(size=8)
+        ))
         fig_pareto.update_layout(
-            xaxis=dict(title="省份", tickangle=45),
-            yaxis=dict(title="销售额(万元)", side="left"),
-            yaxis2=dict(title="累计百分比 (%)", overlaying="y", side="right", range=[0, 110]),
-            plot_bgcolor='rgba(0,0,0,0)', height=500
+            xaxis=dict(title="省份", tickangle=45, showgrid=False),
+            yaxis=dict(title="销售额(万元)", side="left", showgrid=True, gridcolor='#f1f5f9'),
+            yaxis2=dict(title="累计百分比 (%)", overlaying="y", side="right", range=[0, 110], showgrid=False),
+            plot_bgcolor='rgba(0,0,0,0)',
+            height=480,
+            legend=dict(orientation="h", y=1.08, x=0.5, xanchor='center')
         )
         st.plotly_chart(fig_pareto, use_container_width=True)
     else:
         st.info("无数据")
 
-# 城市销售额排行 + 客单价分布
+# ========== 第七行：城市销售额排行 + 客单价分布 ==========
 col_g, col_h = st.columns(2)
 with col_g:
     st.markdown('<div class="section-header">🏙️ 城市销售额排行 TOP20</div>', unsafe_allow_html=True)
@@ -605,7 +742,12 @@ with col_g:
         fig_city = px.bar(city_sale, x="万元", y="城市_订单", orientation='h',
                           color="万元", color_continuous_scale="Oranges", text="万元")
         fig_city.update_traces(texttemplate='%{text:.1f}', textposition='outside')
-        fig_city.update_layout(plot_bgcolor='rgba(0,0,0,0)', height=500)
+        fig_city.update_layout(
+            plot_bgcolor='rgba(0,0,0,0)',
+            height=480,
+            xaxis=dict(showgrid=True, gridcolor='#f1f5f9'),
+            yaxis=dict(showgrid=False)
+        )
         st.plotly_chart(fig_city, use_container_width=True)
     else:
         st.info("无数据")
@@ -613,239 +755,71 @@ with col_h:
     st.markdown('<div class="section-header">💵 客单价分布</div>', unsafe_allow_html=True)
     if not df_o_curr.empty:
         fig_hist = px.histogram(df_o_curr, x="订单金额", nbins=30, title="订单金额分布（元）",
-                                labels={"订单金额": "订单金额（元）"}, color_discrete_sequence=['#10b981'])
-        fig_hist.update_layout(plot_bgcolor='rgba(0,0,0,0)', bargap=0.05, height=500)
+                                labels={"订单金额": "订单金额（元）"},
+                                color_discrete_sequence=['#10b981'])
+        fig_hist.update_traces(marker=dict(line=dict(color='white', width=1)))
+        fig_hist.update_layout(
+            plot_bgcolor='rgba(0,0,0,0)',
+            bargap=0.05,
+            height=480,
+            xaxis=dict(showgrid=True, gridcolor='#f1f5f9'),
+            yaxis=dict(showgrid=True, gridcolor='#f1f5f9'),
+            margin=dict(l=20, r=20, t=50, b=40),
+            title=dict(font=dict(size=16, color='#1f2937'))
+        )
         st.plotly_chart(fig_hist, use_container_width=True)
     else:
         st.info("无订单数据")
 
-# 地理热力地图
+# ========== 第八行：地理热力地图 ==========
 st.markdown('<div class="section-header">🗺️ 地理热力地图（省份销售额气泡图）</div>', unsafe_allow_html=True)
 if not df_o_curr.empty:
-    map_prov_sale = df_o_curr.groupby("省份_订单")["订单金额"].sum().reset_index()
-    map_prov_sale = map_prov_sale[map_prov_sale["省份_订单"].notna() & (map_prov_sale["省份_订单"] != "")]
-    map_prov_sale = map_prov_sale[map_prov_sale["省份_订单"].isin(STANDARD_PROVINCES)]
-    map_prov_sale["万元"] = map_prov_sale["订单金额"] / 10000
-    map_prov_sale["经度"] = map_prov_sale["省份_订单"].apply(lambda x: PROVINCE_CENTER.get(x, [None, None])[0])
-    map_prov_sale["纬度"] = map_prov_sale["省份_订单"].apply(lambda x: PROVINCE_CENTER.get(x, [None, None])[1])
-    map_prov_sale = map_prov_sale.dropna(subset=["经度", "纬度"])
-    if not map_prov_sale.empty:
-        fig_map = px.scatter_geo(map_prov_sale, lon="经度", lat="纬度", size="万元", hover_name="省份_订单",
-                                 text="省份_订单", size_max=60, projection="natural earth",
-                                 title="气泡大小代表销售额(万元)", color="万元", color_continuous_scale="Viridis")
-        fig_map.update_layout(geo=dict(showframe=False, showcoastlines=True), height=500)
+    map_df = df_o_curr.groupby("省份_订单")["订单金额"].sum().reset_index()
+    map_df = map_df[map_df["省份_订单"].notna() & (map_df["省份_订单"] != "")]
+    map_df = map_df[map_df["省份_订单"].isin(STANDARD_PROVINCES)]
+    map_df["万元"] = map_df["订单金额"] / 10000
+    map_df["经度"] = map_df["省份_订单"].apply(lambda x: PROVINCE_CENTER.get(x, [None, None])[0])
+    map_df["纬度"] = map_df["省份_订单"].apply(lambda x: PROVINCE_CENTER.get(x, [None, None])[1])
+    map_df = map_df.dropna(subset=["经度", "纬度"])
+    if not map_df.empty:
+        fig_map = px.scatter_geo(
+            map_df, lon="经度", lat="纬度",
+            size="万元", hover_name="省份_订单",
+            text="省份_订单", size_max=60,
+            projection="natural earth",
+            title="气泡大小代表销售额(万元)",
+            color="万元", color_continuous_scale="Viridis"
+        )
+        fig_map.update_layout(
+            geo=dict(
+                showframe=False, showcoastlines=True,
+                bgcolor='rgba(0,0,0,0)',
+                landcolor='#f0f4fc',
+                countrycolor='#e2e8f0',
+                showland=True, showcountries=True
+            ),
+            height=520,
+            margin=dict(l=0, r=0, t=50, b=0),
+            title=dict(font=dict(size=16, color='#1f2937'))
+        )
         st.plotly_chart(fig_map, use_container_width=True)
     else:
         st.info("无法匹配坐标")
 else:
     st.info("无省份销售额数据")
 
-
-# ==================== 【第二部分：追加的新图表】====================
+# ========== 页脚 ==========
 st.markdown("---")
-st.markdown("### 📊 数据分析图表（新增）", unsafe_allow_html=True)
-
-# 追加1：月度客资数与订单趋势
-st.markdown('<div class="section-header">📅 月度客资数与订单数趋势</div>', unsafe_allow_html=True)
-if not df_m_curr.empty and not df_o_curr.empty:
-    monthly_leads = df_m_curr.groupby(df_m_curr["日期"].dt.to_period("M").astype(str)).size().reset_index(name="客资数")
-    monthly_orders = df_o_curr.groupby(df_o_curr["日期"].dt.to_period("M").astype(str)).size().reset_index(name="订单数")
-    monthly = monthly_leads.merge(monthly_orders, on="日期", how="outer").fillna(0)
-    monthly = monthly.sort_values("日期")
-    fig_trend = go.Figure()
-    fig_trend.add_trace(go.Bar(x=monthly["日期"], y=monthly["客资数"], name="客资数", marker_color='#3b82f6', yaxis="y"))
-    fig_trend.add_trace(go.Bar(x=monthly["日期"], y=monthly["订单数"], name="订单数", marker_color='#f97316', yaxis="y2"))
-    fig_trend.update_layout(
-        barmode='group',
-        yaxis=dict(title="客资数", side="left"),
-        yaxis2=dict(title="订单数", overlaying="y", side="right"),
-        plot_bgcolor='rgba(0,0,0,0)',
-        xaxis_tickangle=-45,
-        legend=dict(orientation="h", y=1.1),
-        margin=dict(l=20, r=20, t=40, b=60),
-        height=450
-    )
-    st.plotly_chart(fig_trend, use_container_width=True)
-else:
-    st.info("无数据")
-
-# 追加2：品类客资占比 + 品类订单金额占比
-col_i, col_j = st.columns(2)
-with col_i:
-    st.markdown('<div class="section-header">🍩 品类客资量占比</div>', unsafe_allow_html=True)
-    if not df_m_curr.empty:
-        cat_leads = df_m_curr.groupby("品类").size().reset_index(name="客资数")
-        fig_cat_leads_pie = px.pie(cat_leads, names="品类", values="客资数", title="品类客资占比",
-                                    color_discrete_sequence=px.colors.qualitative.Pastel)
-        fig_cat_leads_pie.update_traces(textposition='inside', textinfo='percent+label')
-        st.plotly_chart(fig_cat_leads_pie, use_container_width=True)
-    else:
-        st.info("无客资数据")
-with col_j:
-    st.markdown('<div class="section-header">🍩 品类订单金额占比</div>', unsafe_allow_html=True)
-    if not df_o_curr.empty:
-        cat_sale_new = df_o_curr.groupby("品类")["订单金额"].sum().reset_index()
-        fig_cat_sale_pie = px.pie(cat_sale_new, names="品类", values="订单金额", title="品类销售额占比",
-                                   color_discrete_sequence=px.colors.qualitative.Set3)
-        fig_cat_sale_pie.update_traces(textposition='inside', textinfo='percent+label')
-        st.plotly_chart(fig_cat_sale_pie, use_container_width=True)
-    else:
-        st.info("无订单数据")
-
-# 追加3：运营中心客资量 TOP15 + 转化率 TOP15
-col_k, col_l = st.columns(2)
-with col_k:
-    st.markdown('<div class="section-header">🏢 运营中心客资量 TOP15</div>', unsafe_allow_html=True)
-    if not df_m_curr.empty:
-        center_leads_new = df_m_curr.groupby("运营中心").size().reset_index(name="客资数")
-        center_leads_new = center_leads_new.sort_values("客资数", ascending=False).head(15)
-        fig_center_leads_new = px.bar(center_leads_new, x="客资数", y="运营中心", orientation='h',
-                                      color="客资数", color_continuous_scale="Blues", text="客资数")
-        fig_center_leads_new.update_traces(texttemplate='%{text:,}', textposition='outside')
-        fig_center_leads_new.update_layout(plot_bgcolor='rgba(0,0,0,0)', height=500)
-        st.plotly_chart(fig_center_leads_new, use_container_width=True)
-    else:
-        st.info("无客资数据")
-with col_l:
-    st.markdown('<div class="section-header">📊 运营中心转化率 TOP15</div>', unsafe_allow_html=True)
-    if not df_m_curr.empty and not df_o_curr.empty:
-        center_leads_all = df_m_curr.groupby("运营中心").size().reset_index(name="客资数")
-        center_orders_all = df_o_curr.groupby("运营中心").size().reset_index(name="订单数")
-        center_conv = center_leads_all.merge(center_orders_all, on="运营中心", how="left").fillna(0)
-        center_conv["转化率"] = center_conv["订单数"] / center_conv["客资数"] * 100
-        center_conv = center_conv[center_conv["客资数"] >= 10].sort_values("转化率", ascending=False).head(15)
-        fig_conv_new = px.bar(center_conv, x="转化率", y="运营中心", orientation='h',
-                              color="转化率", color_continuous_scale="Greens",
-                              text=center_conv["转化率"].apply(lambda x: f"{x:.1f}%"))
-        fig_conv_new.update_traces(textposition='outside')
-        fig_conv_new.update_layout(plot_bgcolor='rgba(0,0,0,0)', height=500)
-        st.plotly_chart(fig_conv_new, use_container_width=True)
-    else:
-        st.info("无数据")
-
-# 追加4：品牌客资量 TOP15 + 品牌转化率 TOP15
-col_m, col_n = st.columns(2)
-with col_m:
-    st.markdown('<div class="section-header">🏷️ 品牌客资量 TOP15</div>', unsafe_allow_html=True)
-    if not df_m_curr.empty:
-        brand_leads_new = df_m_curr.groupby("品牌").size().reset_index(name="客资数")
-        brand_leads_new = brand_leads_new.sort_values("客资数", ascending=False).head(15)
-        fig_brand_leads_new = px.bar(brand_leads_new, x="客资数", y="品牌", orientation='h',
-                                     color="客资数", color_continuous_scale="Purples", text="客资数")
-        fig_brand_leads_new.update_traces(texttemplate='%{text:,}', textposition='outside')
-        fig_brand_leads_new.update_layout(plot_bgcolor='rgba(0,0,0,0)', height=500)
-        st.plotly_chart(fig_brand_leads_new, use_container_width=True)
-    else:
-        st.info("无客资数据")
-with col_n:
-    st.markdown('<div class="section-header">📊 品牌转化率 TOP15</div>', unsafe_allow_html=True)
-    if not df_m_curr.empty and not df_o_curr.empty:
-        brand_leads_all = df_m_curr.groupby("品牌").size().reset_index(name="客资数")
-        brand_orders_all = df_o_curr.groupby("品牌").size().reset_index(name="订单数")
-        brand_conv = brand_leads_all.merge(brand_orders_all, on="品牌", how="left").fillna(0)
-        brand_conv["转化率"] = brand_conv["订单数"] / brand_conv["客资数"] * 100
-        brand_conv = brand_conv[brand_conv["客资数"] >= 10].sort_values("转化率", ascending=False).head(15)
-        fig_brand_conv_new = px.bar(brand_conv, x="转化率", y="品牌", orientation='h',
-                                    color="转化率", color_continuous_scale="Oranges",
-                                    text=brand_conv["转化率"].apply(lambda x: f"{x:.1f}%"))
-        fig_brand_conv_new.update_traces(textposition='outside')
-        fig_brand_conv_new.update_layout(plot_bgcolor='rgba(0,0,0,0)', height=500)
-        st.plotly_chart(fig_brand_conv_new, use_container_width=True)
-    else:
-        st.info("无数据")
-
-# 追加5：月度品类订单数对比
-st.markdown('<div class="section-header">📅 月度品类订单数对比</div>', unsafe_allow_html=True)
-if not df_o_curr.empty:
-    monthly_cat = df_o_curr.groupby([df_o_curr["日期"].dt.to_period("M").astype(str), "品类"]).size().reset_index(name="订单数")
-    monthly_cat.columns = ["月份", "品类", "订单数"]
-    monthly_cat = monthly_cat.sort_values("月份")
-    cats = monthly_cat["品类"].unique()
-    colors = px.colors.qualitative.Set2[:len(cats)] if len(cats) > 0 else ['#3b82f6']
-    fig_cat_month = go.Figure()
-    for i, cat in enumerate(cats):
-        sub = monthly_cat[monthly_cat["品类"] == cat]
-        fig_cat_month.add_trace(go.Bar(x=sub["月份"], y=sub["订单数"], name=cat, marker_color=colors[i % len(colors)]))
-    fig_cat_month.update_layout(
-        barmode='group',
-        plot_bgcolor='rgba(0,0,0,0)',
-        xaxis_tickangle=-45,
-        legend=dict(orientation="h", y=1.05),
-        margin=dict(l=20, r=20, t=40, b=60),
-        height=450
-    )
-    st.plotly_chart(fig_cat_month, use_container_width=True)
-else:
-    st.info("无订单数据")
-
-# 追加6：省份客资量排行 + 城市销售额 TOP15
-col_o, col_p = st.columns(2)
-with col_o:
-    st.markdown('<div class="section-header">🗺️ 省份客资量排行 TOP20</div>', unsafe_allow_html=True)
-    if not df_m_curr.empty:
-        prov_leads = df_m_curr.groupby("省份_客资").size().reset_index(name="客资数")
-        prov_leads = prov_leads[prov_leads["省份_客资"].notna() & (prov_leads["省份_客资"] != "")]
-        prov_leads = prov_leads[prov_leads["省份_客资"].isin(STANDARD_PROVINCES)]
-        prov_leads = prov_leads.sort_values("客资数", ascending=False).head(20)
-        fig_prov_leads = px.bar(prov_leads, x="客资数", y="省份_客资", orientation='h',
-                                color="客资数", color_continuous_scale="Tealgrn", text="客资数")
-        fig_prov_leads.update_traces(texttemplate='%{text:,}', textposition='outside')
-        fig_prov_leads.update_layout(plot_bgcolor='rgba(0,0,0,0)', height=500)
-        st.plotly_chart(fig_prov_leads, use_container_width=True)
-    else:
-        st.info("无客资数据")
-with col_p:
-    st.markdown('<div class="section-header">🏙️ 城市销售额排行 TOP15</div>', unsafe_allow_html=True)
-    if not df_o_curr.empty:
-        city_sale_new = df_o_curr[df_o_curr["城市_订单"] != ""].groupby("城市_订单")["订单金额"].sum().reset_index()
-        city_sale_new["万元"] = city_sale_new["订单金额"] / 10000
-        city_sale_new = city_sale_new.sort_values("万元", ascending=False).head(15)
-        fig_city_new = px.bar(city_sale_new, x="万元", y="城市_订单", orientation='h',
-                              color="万元", color_continuous_scale="Oranges", text="万元")
-        fig_city_new.update_traces(texttemplate='%{text:.1f}', textposition='outside')
-        fig_city_new.update_layout(plot_bgcolor='rgba(0,0,0,0)', height=500)
-        st.plotly_chart(fig_city_new, use_container_width=True)
-    else:
-        st.info("无订单数据")
-
-# 追加7：全国运营中心分布热力图（气泡大小=客资数，颜色=转化率）
-st.markdown('<div class="section-header">🗺️ 全国运营中心分布热力图（气泡大小=客资数，颜色=转化率）</div>', unsafe_allow_html=True)
-if not df_m_curr.empty and not df_o_curr.empty:
-    prov_leads_map = df_m_curr.groupby("省份_客资").size().reset_index(name="客资数")
-    prov_orders_map = df_o_curr.groupby("省份_订单").size().reset_index(name="订单数")
-    map_df = prov_leads_map.merge(prov_orders_map, left_on="省份_客资", right_on="省份_订单", how="left").fillna(0)
-    map_df["转化率"] = map_df["订单数"] / map_df["客资数"] * 100
-    prov_amount = df_o_curr.groupby("省份_订单")["订单金额"].sum().reset_index()
-    prov_amount.columns = ["省份_客资", "订单金额"]
-    prov_amount["万元"] = prov_amount["订单金额"] / 10000
-    map_df = map_df.merge(prov_amount[["省份_客资", "万元"]], on="省份_客资", how="left").fillna(0)
-    map_df.rename(columns={"万元": "销售额_万元"}, inplace=True)
-    map_df["经度"] = map_df["省份_客资"].apply(lambda x: PROVINCE_CENTER.get(x, [None, None])[0])
-    map_df["纬度"] = map_df["省份_客资"].apply(lambda x: PROVINCE_CENTER.get(x, [None, None])[1])
-    map_df = map_df.dropna(subset=["经度", "纬度"])
-
-    if not map_df.empty:
-        fig_map_new = px.scatter_geo(
-            map_df, lon="经度", lat="纬度",
-            size="客资数", hover_name="省份_客资",
-            text="省份_客资",
-            size_max=60,
-            projection="natural earth",
-            color="转化率",
-            color_continuous_scale="Viridis",
-            title="气泡大小=客资数 | 颜色=转化率（越绿越高）"
-        )
-        fig_map_new.update_layout(
-            geo=dict(showframe=False, showcoastlines=True, bgcolor='rgba(0,0,0,0)'),
-            plot_bgcolor='rgba(0,0,0,0)',
-            height=550
-        )
-        st.plotly_chart(fig_map_new, use_container_width=True)
-    else:
-        st.info("无法匹配坐标数据")
-else:
-    st.info("无足够数据生成地图")
-
-# ==================== 页脚 ====================
-st.markdown("---")
-st.markdown(f"<div style='text-align:center; color:#9ca3af; font-size:0.85rem;'>📊 天猫新零售数据看板 | 数据截至 {latest_date} | 共 {total_leads:,} 条客资 / {order_count:,} 笔订单 / {total_amount/10000:.2f} 万元</div>", unsafe_allow_html=True)
+st.markdown(f"""
+<div style='text-align:center; padding: 1.5rem; background: linear-gradient(135deg, #f8fafc, #f1f5f9); border-radius: 20px; margin-top: 1rem;'>
+    <div style='font-size: 1rem; font-weight: 600; color: #1f2937; margin-bottom: 0.5rem;'>
+        📊 天猫新零售数据看板
+    </div>
+    <div style='font-size: 0.85rem; color: #6b7280;'>
+        数据截至 {latest_date} | 共 <strong>{total_leads:,}</strong> 条客资 / <strong>{order_count:,}</strong> 笔订单 / <strong>{total_wan:.2f}</strong> 万元
+    </div>
+    <div style='margin-top: 0.5rem; font-size: 0.75rem; color: #9ca3af;'>
+        Made with ❤️ | Streamlit
+    </div>
+</div>
+""", unsafe_allow_html=True)
