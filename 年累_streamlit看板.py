@@ -657,4 +657,3 @@ if not df_o_curr.empty and 'province_sale' in locals() and not province_sale.emp
         st.info("无法匹配坐标")
 else:
     st.info("无省份销售额数据")
-生成这种代码，我放在streamlit部署
